@@ -2,96 +2,176 @@ import streamlit as st
 import requests
 import pandas as pd
 import pydeck as pdk
+from datetime import datetime
 
 # --- ページ設定 ---
-st.set_page_config(page_title="九州気温 3D Map", layout="wide")
-st.title("九州主要都市の現在の気温 3Dカラムマップ")
+st.set_page_config(page_title="日本全国 気温3D Map", layout="wide")
+st.title("🇯🇵 日本主要都市の気温推移 3Dビジュアライゼーション")
 
-# 九州7県のデータ
-kyushu_capitals = {
-    'Fukuoka':    {'lat': 33.5904, 'lon': 130.4017},
-    'Saga':       {'lat': 33.2494, 'lon': 130.2974},
-    'Nagasaki':   {'lat': 32.7450, 'lon': 129.8739},
-    'Kumamoto':   {'lat': 32.7900, 'lon': 130.7420},
-    'Oita':       {'lat': 33.2381, 'lon': 131.6119},
-    'Miyazaki':   {'lat': 31.9110, 'lon': 131.4240},
-    'Kagoshima':  {'lat': 31.5600, 'lon': 130.5580}
+# --- 1. 全国主要都市のデータ定義 ---
+cities = {
+    'Sapporo':   {'lat': 43.0618, 'lon': 141.3545},
+    'Aomori':    {'lat': 40.8244, 'lon': 140.7400},
+    'Sendai':    {'lat': 38.2682, 'lon': 140.8694},
+    'Niigata':   {'lat': 37.9022, 'lon': 139.0236},
+    'Tokyo':     {'lat': 35.6895, 'lon': 139.6917},
+    'Kanazawa':  {'lat': 36.5613, 'lon': 136.6562},
+    'Nagoya':    {'lat': 35.1815, 'lon': 136.9066},
+    'Osaka':     {'lat': 34.6937, 'lon': 135.5023},
+    'Hiroshima': {'lat': 34.3853, 'lon': 132.4553},
+    'Kochi':     {'lat': 33.5588, 'lon': 133.5312},
+    'Fukuoka':   {'lat': 33.5904, 'lon': 130.4017},
+    'Kagoshima': {'lat': 31.5600, 'lon': 130.5580},
+    'Naha':      {'lat': 26.2124, 'lon': 127.6809}
 }
 
-# --- データ取得関数 ---
-@st.cache_data(ttl=600)
-def fetch_weather_data():
-    weather_info = []
+# --- 2. データ取得関数 (高速化: まとめて取得) ---
+@st.cache_data(ttl=3600)  # 1時間キャッシュ
+def fetch_forecast_data():
+    lats = [coords['lat'] for coords in cities.values()]
+    lons = [coords['lon'] for coords in cities.values()]
+    city_names = list(cities.keys())
+
+    # Open-Meteoはカンマ区切りで複数地点を一括取得可能
     BASE_URL = 'https://api.open-meteo.com/v1/forecast'
+    params = {
+        'latitude': lats,
+        'longitude': lons,
+        'hourly': 'temperature_2m',
+        'timezone': 'Asia/Tokyo',
+        'forecast_days': 1 # 今日1日分
+    }
     
-    for city, coords in kyushu_capitals.items():
-        params = {
-            'latitude':  coords['lat'],
-            'longitude': coords['lon'],
-            'current': 'temperature_2m'
-        }
-        try:
-            response = requests.get(BASE_URL, params=params)
-            response.raise_for_status()
-            data = response.json()
-            weather_info.append({
-                'City': city,
-                'lat': coords['lat'],
-                'lon': coords['lon'],
-                'Temperature': data['current']['temperature_2m']
-            })
-        except Exception as e:
-            st.error(f"Error fetching {city}: {e}")
+    try:
+        response = requests.get(BASE_URL, params=params)
+        response.raise_for_status()
+        data = response.json()
+        
+        # 複数地点の場合、dataはリストで返ってくる
+        all_records = []
+        
+        # レスポンスが1地点か複数地点かで構造が変わるための対応
+        data_list = data if isinstance(data, list) else [data]
+
+        for i, city_data in enumerate(data_list):
+            city_name = city_names[i]
+            times = city_data['hourly']['time']
+            temps = city_data['hourly']['temperature_2m']
             
-    return pd.DataFrame(weather_info)
+            for t, temp in zip(times, temps):
+                all_records.append({
+                    'City': city_name,
+                    'lat': lats[i],
+                    'lon': lons[i],
+                    'Time': t, # ISO format string
+                    'Temperature': temp
+                })
+                
+        return pd.DataFrame(all_records)
 
-# データの取得
-with st.spinner('最新の気温データを取得中...'):
-    df = fetch_weather_data()
+    except Exception as e:
+        st.error(f"データ取得エラー: {e}")
+        return pd.DataFrame()
 
-# 気温を高さ（メートル）に変換（例：1度 = 3000m）
-df['elevation'] = df['Temperature'] * 3000
+# --- 3. 色決定関数 (色合いを明るく・温度で変化) ---
+def get_color(temp):
+    # 透明度(Alpha)は180/255
+    if temp < 0:
+        return [0, 0, 255, 200]      # 氷点下: 青
+    elif temp < 10:
+        return [0, 255, 255, 200]    # 10度未満: シアン
+    elif temp < 20:
+        return [0, 255, 0, 200]      # 20度未満: 緑
+    elif temp < 25:
+        return [255, 165, 0, 200]    # 25度未満: オレンジ
+    else:
+        return [255, 0, 0, 200]      # 25度以上: 赤
 
-# --- メインレイアウト ---
-col1, col2 = st.columns([1, 2])
+# データ読み込み
+with st.spinner('全国の気象データをロード中...'):
+    full_df = fetch_forecast_data()
 
-with col1:
-    st.subheader("取得したデータ")
-    st.dataframe(df[['City', 'Temperature']], use_container_width=True)
+if not full_df.empty:
+    # --- 4. タイムスライダー (アニメーション要素) ---
+    # ユニークな時間リストを作成
+    time_options = full_df['Time'].unique()
     
-    if st.button('データを更新'):
-        st.cache_data.clear()
-        st.rerun()
+    # スライダーで選択 (デフォルトは今の時間に近いもの)
+    current_hour_iso = datetime.now().strftime('%Y-%m-%dT%H:00')
+    try:
+        default_index = list(time_options).index(current_hour_iso)
+    except ValueError:
+        default_index = 0
 
-with col2:
-    st.subheader("3D カラムマップ")
+    col_control, col_map = st.columns([1, 3])
 
-    # Pydeck の設定
-    view_state = pdk.ViewState(
-        latitude=32.7,
-        longitude=131.0,
-        zoom=6.2,
-        pitch=45,  # 地図を傾ける
-        bearing=0
-    )
+    with col_control:
+        st.subheader("🎮 コントロール")
+        selected_time = st.select_slider(
+            "時刻を選択してください",
+            options=time_options,
+            value=time_options[default_index]
+        )
+        
+        st.info(f"選択中の時刻: **{selected_time}**")
 
-    layer = pdk.Layer(
-        "ColumnLayer",
-        data=df,
-        get_position='[lon, lat]',
-        get_elevation='elevation',
-        radius=12000,        # 柱の太さ
-        get_fill_color='[255, 100, 0, 180]', # 柱の色（オレンジ系）
-        pickable=True,       # ホバーを有効に
-        auto_highlight=True,
-    )
+        # 選択された時間でフィルタリング
+        df_filtered = full_df[full_df['Time'] == selected_time].copy()
 
-    # 描画
-    st.pydeck_chart(pdk.Deck(
-        layers=[layer],
-        initial_view_state=view_state,
-        tooltip={
-            "html": "<b>{City}</b><br>気温: {Temperature}°C",
-            "style": {"color": "white"}
-        }
-    ))
+        # 高さ計算 (極端に短くならないようにオフセットを追加)
+        # マイナス気温でも埋もれないように +20 してから倍率を掛ける工夫
+        df_filtered['elevation'] = (df_filtered['Temperature'] + 20) * 2000
+        
+        # 色のカラムを追加
+        df_filtered['color'] = df_filtered['Temperature'].apply(get_color)
+
+        st.markdown("---")
+        st.write("📊 **気温リスト**")
+        st.dataframe(
+            df_filtered[['City', 'Temperature']].sort_values('Temperature', ascending=False),
+            use_container_width=True,
+            hide_index=True
+        )
+
+    with col_map:
+        # Pydeck 設定
+        view_state = pdk.ViewState(
+            latitude=36.0,      # 日本の中心付近
+            longitude=138.0,
+            zoom=4.5,           # 全国が見えるズーム率
+            pitch=50,
+            bearing=0
+        )
+
+        layer = pdk.Layer(
+            "ColumnLayer",
+            data=df_filtered,
+            get_position='[lon, lat]',
+            get_elevation='elevation',
+            elevation_scale=1,
+            radius=25000,          # 全国マップなので少し太く
+            get_fill_color='color',# 計算した色を使用
+            pickable=True,
+            auto_highlight=True,
+            extruded=True,
+        )
+
+        st.pydeck_chart(pdk.Deck(
+            layers=[layer],
+            initial_view_state=view_state,
+            tooltip={
+                "html": """
+                    <div style='background: grey; padding: 10px; color: white; border-radius: 5px;'>
+                        <b>{City}</b><br>
+                        時刻: {Time}<br>
+                        気温: <b>{Temperature}</b> °C
+                    </div>
+                """,
+                "style": {"color": "white"}
+            }
+        ))
+    
+    st.caption("出典: Open-Meteo API | スライダーを動かすと時間帯ごとの気温変化を確認できます。")
+
+else:
+    st.error("データの取得に失敗しました。")
